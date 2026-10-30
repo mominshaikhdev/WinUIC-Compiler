@@ -244,6 +244,12 @@ struct PlatformControl {
     std::string                    template_resource_key;// x:Key in ResourceDictionary
     std::string                    resource_dictionary;  // relative path to .xaml
 
+    // Escape hatch ("override": true in a third-party registry JSON entry):
+    // this entry REPLACES the official/built-in definition of the control
+    // instead of merging into it - for official controls that are poorly
+    // implemented. Off by default: registries extend, never hijack.
+    bool                       override_official = false;
+
 
 
     [[nodiscard]] auto map_property(std::string_view abstract) const
@@ -285,6 +291,7 @@ struct PlatformBackend {
     std::string                    description;
 
     std::vector<PlatformControl>   controls;
+    std::vector<std::string>       resource_dictionaries; // platform resource dictionaries to merge
 
 
 
@@ -456,7 +463,16 @@ public:
 
         json.reserve(64 * 1024);
 
-        json += "{\"version\":1,\"backend\":\"winui3\",\"controls\":[";
+        json += "{\"version\":1,\"backend\":\"winui3\"";
+        if (be && !be->resource_dictionaries.empty()) {
+            json += ",\"resource_dictionaries\":[";
+            for (size_t k = 0; k < be->resource_dictionaries.size(); ++k) {
+                if (k > 0) json += ",";
+                json += "\"" + escape(be->resource_dictionaries[k]) + "\"";
+            }
+            json += "]";
+        }
+        json += ",\"controls\":[";
 
         for (size_t i = 0; i < names.size(); ++i) {
 
@@ -1053,6 +1069,8 @@ public:
         // Find "controls" array position
 
         std::size_t ctrl_arr_pos = std::string_view::npos;
+        PlatformBackend backend;
+        backend.name = backend_name;
 
         {
 
@@ -1096,6 +1114,18 @@ public:
 
                     }
 
+                    if (kname == "resource_dictionaries" && p < json.size() && json[p] == '[') {
+                        std::size_t rdp = p + 1;
+                        while (rdp < json.size() && json[rdp] != ']') {
+                            rdp = skip_ws(json, rdp);
+                            if (rdp < json.size() && json[rdp] == '"') {
+                                auto [rds, rend] = read_string(json, rdp);
+                                if (!rds.empty()) backend.resource_dictionaries.push_back(std::string(rds));
+                                rdp = rend;
+                            } else { ++rdp; }
+                        }
+                    }
+
                     // skip value
 
                     if (p < json.size()) {
@@ -1130,12 +1160,6 @@ public:
 
 
 
-        PlatformBackend backend;
-
-        backend.name = backend_name;
-
-
-
         for_each_array_obj(json, ctrl_arr_pos, [&](std::size_t obj_start, std::size_t /*obj_end*/) {
 
             std::size_t inner = obj_start + 1;
@@ -1151,6 +1175,14 @@ public:
             auto [accepts_children_raw, children_pos] = find_key(json, inner, "accepts_children");
 
             auto [accepts_text_raw, text_pos]         = find_key(json, inner, "accepts_text_content");
+
+            // Explicit composition for third-party controls: how children
+            // attach on the platform (panel / content / items / items_panel /
+            // navigation / documents / ...). Metadata-driven — a JSON entry
+            // declares it, no compiler rebuild. When absent, the loader's
+            // accepts_children → "content" inference applies.
+            auto [composition_kind_json, comp_pos]    = find_key(json, inner, "composition_kind");
+            (void)comp_pos;
 
 
 
@@ -1195,6 +1227,9 @@ public:
             auto children_opt     = read_bool(children_pos);
 
             auto text_opt         = read_bool(text_pos);
+            auto [override_raw, override_pos] = find_key(json, inner, "override");
+            (void)override_raw;
+            bool override_ctrl = read_bool(override_pos).value_or(false);
 
             if (category.empty()) category = "custom";
 
@@ -1220,6 +1255,7 @@ public:
             {
                 auto [rd_raw, _rd2] = find_key(json, inner, "resource_dictionary");
                 ctrl.resource_dictionary = rd_raw;
+                ctrl.override_official = override_ctrl;
             }
 
 
@@ -1366,6 +1402,8 @@ public:
                 schema.category = category;
                 schema.accepts_children = accepts_children;
                 schema.accepts_text_content = accepts_text;
+                if (!composition_kind_json.empty())
+                    schema.composition_kind = composition_kind_json;
                 schema.description = "Runtime-registered control (backend JSON)";
                 for (auto const& pm : parsed_props) {
                     ast::TypeKind tk = ast::TypeKind::String;
@@ -1390,6 +1428,36 @@ public:
                 // Merge additional properties/events from JSON into the
                 // existing schema (skip properties that already exist).
                 auto& existing = reg.m_controls.at(abstract_name);
+                if (override_ctrl) {
+                    // Escape hatch: this registry entry judges the official
+                    // control poorly implemented - REPLACE its schema
+                    // wholesale instead of merging. The description switch
+                    // makes the capability-flag guard below treat the entry
+                    // as JSON-owned, so accepts_children/accepts_text apply.
+                    existing.properties.clear();
+                    existing.events.clear();
+                    for (auto const& pm : parsed_props) {
+                        ast::TypeKind tk = ast::TypeKind::String;
+                        if (pm.value_transform == "double") tk = ast::TypeKind::Double;
+                        else if (pm.value_transform == "int") tk = ast::TypeKind::Int;
+                        else if (pm.value_transform == "nullable_bool" || pm.value_transform == "bool") tk = ast::TypeKind::Bool;
+                        existing.properties.push_back({
+                            .name = pm.abstract_name,
+                            .type = tk,
+                            .description = "Runtime-registered property (JSON override)"
+                        });
+                    }
+                    for (auto const& em : parsed_events) {
+                        existing.events.push_back({
+                            .name = em.abstract_name,
+                            .param_types = { ast::TypeKind::Void },
+                            .description = "Runtime-registered event (JSON override)"
+                        });
+                    }
+                    existing.accepts_children = accepts_children;
+                    existing.accepts_text_content = accepts_text;
+                    existing.description = "Runtime-registered control (backend JSON)";
+                } else {
                 for (auto const& pm : parsed_props) {
                     if (!existing.find_property(pm.abstract_name)) {
                         ast::TypeKind tk = ast::TypeKind::String;
@@ -1412,21 +1480,24 @@ public:
                         });
                     }
                 }
+                }
+
+            }            // Official-first for capability flags: a JSON overlay may set
+            // accepts_children / accepts_text_content on its OWN controls (new
+            // or previously JSON-registered), but never overrules the
+            // compiled-in winui3 backend - official controls always win over
+            // third-party registries on conflicts. JSON-registered schemas
+            // carry the runtime description assigned at registration above;
+            // built-in controls keep their real description.
+            {
+                auto fit = reg.m_controls.find(abstract_name);
+                bool official = fit != reg.m_controls.end()
+                    && fit->second.description != "Runtime-registered control (backend JSON)";
+                if (!official) {
+                    if (children_opt) reg.m_controls[abstract_name].accepts_children = *children_opt;
+                    if (text_opt)     reg.m_controls[abstract_name].accepts_text_content = *text_opt;
+                }
             }
-
-
-
-            // Last-writer-wins for capability flags: when a JSON overlay
-
-            // explicitly sets accepts_children / accepts_text_content, update
-
-            // the (possibly pre-existing) abstract schema so the catalog,
-
-            // parser and semantic analysis agree with the newest overlay.
-
-            if (children_opt) reg.m_controls[abstract_name].accepts_children = *children_opt;
-
-            if (text_opt)     reg.m_controls[abstract_name].accepts_text_content = *text_opt;
 
         });
 
@@ -1458,6 +1529,20 @@ public:
 
                 if (it != existing->controls.end()) {
 
+                    if (c.override_official) {
+
+                        // Explicit per-control escape hatch: the registry
+
+                        // fully REPLACES the built-in control - platform type,
+
+                        // namespace, mappings and fixed properties all come
+
+                        // from the JSON entry.
+
+                        *it = std::move(c);
+
+                    } else {
+
                     // Built-in mapping wins: merge only the JSON-only
 
                     // property/event/fixed mappings into the existing
@@ -1485,6 +1570,8 @@ public:
                             if (f.first == fp.first) { have = true; break; }
 
                         if (!have) it->fixed_properties.push_back(fp);
+
+                    }
 
                     }
 
@@ -1591,7 +1678,7 @@ private:
             },
 
             .accepts_children = true,
-            .composition_kind = "content",
+            .composition_kind = "panel",
 
             .category = "layout",
 
@@ -1614,7 +1701,7 @@ private:
             },
 
             .accepts_children = true,
-            .composition_kind = "content",
+            .composition_kind = "panel",
 
             .category = "layout",
 
@@ -1727,6 +1814,8 @@ private:
             },
 
             .accepts_children = true,
+
+            .composition_kind = "panel",
 
             .description = "Wrapping layout panel — children wrap to next row/column when space runs out.",
 
@@ -2203,6 +2292,8 @@ private:
 
             .accepts_children = true,
 
+            .composition_kind = "items",
+
             .category = "menus",
 
         });
@@ -2218,7 +2309,7 @@ private:
             .accepts_children = true,
 
 
-            .composition_kind = "items_panel",
+            .composition_kind = "items",
             .category = "menus",
 
         });
@@ -2247,7 +2338,7 @@ private:
 
             .accepts_text_content = true,
 
-            .composition_kind = "content",
+            .composition_kind = "items_panel",
 
             .category = "menus",
 
@@ -2308,7 +2399,7 @@ private:
             },
 
             .accepts_children = true,
-            .composition_kind = "items_panel",
+            .composition_kind = "content",
 
             .category = "menus",
 
@@ -2375,6 +2466,8 @@ private:
             },
 
             .accepts_children = true,
+
+            .composition_kind = "items",
 
             .category = "collections",
 
@@ -2456,6 +2549,8 @@ private:
 
             .accepts_children = true,
 
+            .composition_kind = "items",
+
             .category = "collections",
 
         });
@@ -2495,7 +2590,7 @@ private:
             .events = { {.name="onRefreshRequested"} },
 
             .accepts_children = true,
-            .composition_kind = "items_panel",
+            .composition_kind = "content",
 
             .category = "collections",
 
@@ -2644,7 +2739,7 @@ private:
 
 
 
-            .composition_kind = "items_panel",
+            .composition_kind = "content",
 
             .category = "input",
 
@@ -2733,7 +2828,7 @@ private:
 
 
 
-            .composition_kind = "items_panel",
+            .composition_kind = "content",
 
             .category = "input",
 
@@ -2844,6 +2939,8 @@ private:
             .events = { {.name="onSelectionChanged", .param_types={TK::Int}} },
 
             .accepts_children = true,
+
+            .composition_kind = "items",
 
             .category = "input",
 
@@ -3082,7 +3179,7 @@ private:
             .accepts_children = true,
 
 
-            .composition_kind = "items_panel",
+            .composition_kind = "content",
             .category = "dialogs",
 
         });
@@ -3104,7 +3201,7 @@ private:
             .events = { {.name="onClosed"} },
 
             .accepts_children = true,
-            .composition_kind = "content",
+            .composition_kind = "popup",
 
             .category = "dialogs",
 
@@ -3647,7 +3744,7 @@ private:
             .events = { {.name="onSelectionChanged", .param_types={TK::Int}} },
 
             .accepts_children = true,
-            .composition_kind = "panel",
+            .composition_kind = "items",
 
             .category = "navigation",
 
@@ -3989,6 +4086,8 @@ private:
 
             .accepts_text_content = true,
 
+            .composition_kind = "blocks",
+
             .category = "text",
 
         });
@@ -4041,12 +4140,9 @@ private:
 
                 {.name="wrapping", .type=TK::String},
 
-            },
-
-            .accepts_children = true,
-
+            },            .accepts_children = true,
             .accepts_text_content = true,
-
+            .composition_kind = "documents",
             .category = "text",
 
         });
@@ -4600,6 +4696,12 @@ private:
         be.name        = "winui3";
 
         be.description = "WinUI 3 / C++/WinRT — Microsoft.UI.Xaml mapping (Windows App SDK)";
+
+        be.resource_dictionaries = {
+            "Microsoft.UI.Xaml.Controls.XamlControlsResources",
+            "Microsoft.UI.Xaml.Controls.Tabular.TabularControlsResources",
+            "Microsoft.UI.Xaml.Controls.XamlChartsResources"
+        };
 
 
 

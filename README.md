@@ -1,6 +1,6 @@
 # WinUIC Compiler
 
-A framework-agnostic, declarative UI domain-specific language (DSL) for **WinUI 3 / Windows App SDK** and multi-platform native backends. `.winui` combines the expressive power of SwiftUI with native, projection-agnostic metadata compilation.
+A framework-agnostic, declarative UI domain-specific language (DSL) for **WinUI 3 / Windows App SDK** and multi-platform native backends. `.winui` combines the expressive power of SwiftUI with native, projection-agnostic metadata compilation. The emitted `.winmd` is consumed by **any** language projection — [**CppWinC**](https://github.com/mominshaikhdev/CppWinC-Compiler) (C++23 named modules) for C++, **CsWinC** for C#, Rust (`windows-rs`), Python (`PyWinC`), and future bindings alike.
 
 ---
 
@@ -29,6 +29,9 @@ A framework-agnostic, declarative UI domain-specific language (DSL) for **WinUI 
    - [V — Views & Version Directives](#v--views--version-directives)
 5. [Complete Code Examples](#complete-code-examples)
 7. [`winuic.exe` Compiler Architecture & CLI Reference](#winuicexe-compiler-architecture--cli-reference)
+8. [Language Projection Owners Guide](#language-projection-owners-guide)
+   - [Consuming winuic Types — The A-Z Language-Agnostic Contract](#consuming-winuic-types--the-a-z-language-agnostic-contract)
+   - [C++ Projection (CppWinC) — WinUIC .winmd Consumption Contract](#c-projection-cppwinc--winuic-winmd-consumption-contract)
 
 ---
 
@@ -44,13 +47,16 @@ A framework-agnostic, declarative UI domain-specific language (DSL) for **WinUI 
 
 ## Core Philosophy
 
-The `WinUIC` compiler engine is built upon four core architectural pillars:
+The `WinUIC` compiler engine is built upon five core architectural pillars:
 
 - **⚡ Zero Overhead Compilation**: `WinUIC` compiles `.winui` views directly into native visual tree instantiations and direct reactive property observers. There is no intermediate representation, no diffing algorithm, no reconciliation latency, and zero GC allocation overhead.
 - **🎨 Zero XAML**: Eliminates verbose XML markup, XAML namespace management, complex XAML build targets, and design-time XAML compilation steps in favor of a clean, Swift-inspired declarative DSL syntax.
 - **📄 Zero IDL**: Generates ECMA-335 `.winmd` binary metadata directly in memory using C++20 compiler modules, eliminating `.idl` file maintenance, `midl.exe` invocations, and MIDLRT build dependencies.
 - **🔗 Zero Code-Behind**: Eliminates partial class boilerplate, `.xaml.cs` or `.xaml.cpp` code-behind glue files, and manual event subscription code. All reactive state observers, bindings, and event callbacks are synthesized directly by `winuic.exe`.
-- **🧩 Business Logic Friendly**: Zero Code-Behind does NOT mean zero business logic. The generated `.ixx` modules export public APIs (state variables, event callbacks, methods) that business logic files import directly. Backend services, databases, APIs, and other components interact with the UI through these exported modules — never through glue code. This is the same principle for all future projections (pywinrtc, winrs, etc.).
+- **🌐 Zero Virtual DOM**: Eliminates synthetic tree structures, reconciliation diffing passes, and runtime vDOM overhead in favor of direct, fine-grained native UI property updates.
+- **🧩 Business Logic Friendly**: Zero Code-Behind does NOT mean zero business logic. Each compiled view's class in the `.winmd` carries public surface (state variables, event callbacks, methods) that business-logic files in **any** projection consume directly. Backend services, databases, APIs, and other components interact with the UI through that surface — never through glue code. This is the same principle for all projections (CppWinC's C++23 named modules today, PyWinC, windows-rs, etc. tomorrow).
+- **Projection-Agnostic & Type-Safe Metadata**: `winuic.exe` emits no language-specific code. Its output is standard, completely projection-agnostic ECMA-335 `.winmd` binary metadata and `resources.pri` payloads. All view structures, properties, event callbacks, and control definitions remain strictly in type-safe metadata tables (TypeDef, MethodDef, Field, Param, CustomAttribute, TypeRef). Downstream language projections (CppWinC for C++23 modules, PyWinC for Python, windows-rs for Rust, C#/WinRT) consume the exact same type-safe `.winmd` with zero language bias and zero runtime translation overhead. Every type signature, callback signature, and property type is preserved with 100% type safety directly in the CLI metadata tables.
+- **🏛️ Metadata-First in WinUI 3**: Shifts WinUI 3 completely away from brittle compile-time markup and code-behind coupling to an open, self-describing **metadata-first** architecture. Controls, containers, layouts, and views emit rich ECMA-335 metadata containing full layout specifications (`WinUIAttribute`) and an extensible control catalog (`WinUIControlCatalogAttribute`). Downstream compilers like `cppwinc` dynamically discover controls, resolve namespaces, evaluate properties, instantiate resources, and assemble views directly from metadata without requiring compiler rebuilds for future controls, layouts, or platform releases.
 
 ---
 
@@ -89,9 +95,9 @@ The `.winui` compiler suite and runtime framework provide deep OS-level integrat
 - **Projection Execution**: Target language projections read the layout tree payload from metadata and generate native UI control instantiation statements and `Content()` panel assignment automatically inside view initialization.
 
 ### 7. Control Catalog Attribute (`WinUIControlCatalogAttribute`)
-- **Metadata Serialization**: `winmd_emitter.ixx` serializes the **entire control registry** — every abstract control schema plus its compiled-in WinUI 3 platform mapping — as a JSON blob into the `.winmd`, attached to the **`<Module>` TypeDef row (exactly once per module)**.
-- **Projection Execution**: Target language projections read this module-level attribute once at assembly load to build their abstract → platform control table, resolving every control name found in `WinUIAttribute` payloads **without hardcoding any mapping**.
-- **Self-Describing Metadata**: New controls added to `winuic.exe` propagate to all projections automatically — no projection-side dictionary updates required.
+- **Metadata Serialization**: `winmd_emitter.ixx` serializes the **entire control registry** — every abstract control schema, platform mappings, registered platform `resource_dictionaries`, and control-level `resource_dictionary` bindings — as a JSON blob into the `.winmd`, attached to the **`<Module>` TypeDef row (exactly once per module)**.
+- **Projection Execution**: Target language projections read this module-level attribute once at assembly load to build their abstract → platform control table, resolving every control name and instantiating all required resource dictionaries found in `WinUIControlCatalogAttribute` **without hardcoding any mapping**.
+- **Self-Describing Metadata & Unknown Control Resources**: New controls and specialized platform resource dictionaries added to `winuic.exe` or third-party component libraries propagate to all projections automatically with zero projection rebuilds.
 
 ### 10. Glob Pattern & Directory Scanning
 - **Glob Expansion**: The CLI accepts wildcard patterns (`*.winui`, `page*.winui`) even when the shell doesn't expand them — the compiler implements its own `*` and `?` pattern matching.
@@ -113,10 +119,11 @@ The `.winui` compiler suite and runtime framework provide deep OS-level integrat
 - **Hardware-Accelerated Parallel Build**: Compiles `.winui` component files concurrently across all available CPU hardware threads via C++20 `std::jthread`.
 - **Direct PE Metadata Generation**: Emits ECMA-335 WinRT binary `.winmd` metadata files directly from AST/IR in memory—completely bypassing IDL file generation and `midl.exe` compilation dependencies.
 
-### 12. Reference-Only Asset Copying
+### 12. Reference-Only Asset & LICENSE Copying
 - **Smart Asset Detection**: Scans all input `.winui` files for asset references (`ms-appx:///Assets/...`, `"Assets/..."` quoted paths) using simple string matching — no regex, no external dependencies.
 - **Source Root Discovery**: Walks up from each input file and checks sibling directories for `Assets/` folders using Win32 APIs, so it finds the original source project even when the `.winui` tree is in a different directory.
 - **Copies Only Referenced Files**: Only assets that are actually referenced in the `.winui` source are copied to the output directory — no dead assets, no wasted disk space.
+- **Automatic LICENSE Preservation**: Automatically detects any `LICENSE` file in the source root directories and copies it into the output directory next to the generated `.winmd` metadata.
 
 ---
 
@@ -172,6 +179,13 @@ export view CounterView {
 > 
 > 4. **Module-Level Catalog Scope**:
 >    - **`WinUIControlCatalogAttribute`** is attached to the **`<Module>` TypeDef (row 1)**, NOT to any view class. Read it **once per `.winmd`**, at module/assembly load, and cache the resulting control table. It MUST NOT be treated as a view-level attribute, and MUST NOT be re-emitted per view.
+> 
+> 5. **Projection-Agnostic Dynamic Control Resource Dictionaries**:
+>    - **Catalog Serialization**: `winuic.exe` serializes all registered platform resource dictionaries (e.g. `XamlControlsResources`, `TabularControlsResources`, `XamlChartsResources`, and any future control libraries) under the top-level `"resource_dictionaries"` array within `WinUIControlCatalogAttribute` on `<Module>`. Furthermore, individual controls declare their required platform or XAML resources via `"resource_dictionary"`.
+>    - **Contract for All Language Projections** (C++, C#, Rust, Python, Go):
+>      - At application launch/bootstrap, projections MUST inspect `WinUIControlCatalogAttribute` and instantiate all resource dictionaries declared in `"resource_dictionaries"`, appending them to the platform's merged resource dictionaries (`Application.Current.Resources.MergedDictionaries`).
+>      - Projections should additionally inspect loaded `.winmd` TypeDef tables for any platform classes ending with `Resources` that derive from `ResourceDictionary`, automatically merging them.
+>      - This contract ensures 100% Day-1 compatibility for future controls and third-party control packages across all language projections without requiring code changes or recompilations of the projection tool.
 
 ---
 
@@ -368,7 +382,6 @@ ViewDecl         ::= 'export' 'view' IDENT '{' ViewMember* '}'
 ViewMember       ::= PropertyDecl | CallbackDecl | BodyBlock | BodyItem
 
 PropertyDecl     ::= ( '@state' | '@binding' | '@published' | '@computed' | '@environment' )? 'var' IDENT ':' Type ( '=' Expr )? ';'
-                   | 'property' Type IDENT ':' Expr ';'
 
 CallbackDecl     ::= 'callback' IDENT '(' ParamList? ')' ';'
 ParamList        ::= Param ( ',' Param )*
@@ -477,7 +490,7 @@ Label(username ?? "Guest")
 
 | Category | Keywords |
 | :--- | :--- |
-| **Structure** | `import`, `from`, `export`, `view`, `body`, `callback`, `property`, `var`, `let` |
+| **Structure** | `import`, `from`, `export`, `view`, `body`, `callback`, `var`, `let` |
 | **Control Flow** | `if`, `else`, `ForEach`, `in`, `return`, `while`, `switch`, `case`, `default` |
 | **Context** | `root`, `self` |
 | **Literals** | `true`, `false` |
@@ -567,9 +580,6 @@ Properties represent member data on views:
 
 // let — immutable local binding (alias for var inside closures)
 let limit: int = 100;
-
-// Legacy syntax
-property string title: "Default Header";
 ```
 
 #### 2. Primitive Types
@@ -898,7 +908,7 @@ winuic.exe -f file1.winui,file2.winui -o ./out -n MyNamespace -v
 | :--- | :--- | :--- | :--- |
 | `-f` | `-files <csv>` | Comma-separated list of `.winui` files to compile | `<positional args>` |
 | `-o` | `-out_dir <dir>` | Target output directory for generated `.winmd` and `.pri` files | `./out` |
-| `-n` | `-namespace <ns>` | Project root namespace for generated WinRT metadata | `MyGeneratedUI` |
+| `-n` | `-namespace <ns>` | Project root namespace for generated WinRT metadata; **overrides any derived name** — names the emitted `.winmd` file (`<ns>.winmd`), the metadata module string and every class namespace. Default: spaces are hyphen-joined (`WinUI Gallery` → `WinUI-Gallery`) | `MyGeneratedUI` |
 | `-p` | `-project <name>` | Project name (defaults to namespace name) | Same as namespace |
 | `-c` | `-control <file>` | Path to a control-registry JSON (repeatable, no recompile). **Any file name is accepted** — there is no hardcoded `winui.json`; every `*.json` sitting next to `winuic.exe` is auto-loaded as a control registry (non-registry JSON files are skipped silently). Explicit `-control` files are applied on top and win on duplicate names | `*.json` next to `winuic.exe` (auto-loaded) |
 | `-v` | `-verbose` | Enable detailed diagnostic output and timing stats | `false` |
@@ -955,7 +965,7 @@ winuic.exe -f winui_src\CustomControlsTest.winui -o out -n MyCompany.Controls -v
 
 ## Language Projection Owners Guide
 
-> **Audience**: Authors of language projections that consume `winuic.exe` output — C++/WinRT, C#, Rust (`windows` crate), Python (`winrt`), Swift, Kotlin/JVM, or any future binding layer.
+> **Audience**: Authors of language projections that consume `winuic.exe` output — [**CppWinC**](https://github.com/mominshaikhdev/CppWinC-Compiler) (C++23 named modules), **CsWinC** (C#), Rust (`windows-rs`), Python (`PyWinC`), Swift, Kotlin/JVM, or any future binding layer.
 
 This section is the single authoritative reference for every obligation a projection has when consuming a `.winmd` produced by `winuic.exe`.
 
@@ -1105,7 +1115,7 @@ The decoded string is a **JSON array** of body nodes representing the complete v
 
 #### Abstract control → platform mapping
 
-| Abstract name | WinUI3 (C++/WinRT) | Qt | Web |
+| Abstract name | WinUI3 (CppWinC) | Qt | Web |
 |---|---|---|---|
 | `Column` | `StackPanel` (Vertical) | `QVBoxLayout` | `flex-col div` |
 | `Row` | `StackPanel` (Horizontal) | `QHBoxLayout` | `flex-row div` |
@@ -1173,7 +1183,7 @@ The decoded string is a **JSON array** of body nodes representing the complete v
 
 ### WinUIControlCatalogAttribute — JSON Schema
 
-`WinUIControlCatalogAttribute` embeds the **complete control registry** compiled into `winuic.exe`: every abstract control schema (name, category, capabilities, properties, events) plus its compiled-in **WinUI 3 platform mapping** (platform type, namespace, fixed properties, per-property setters & value transforms) — plus any third-party backend controls merged in at compile time via `-c/-control <file>.json`. The catalog is **language-projection agnostic**: it contains WinRT API names only (full namespaces, bare enum member names), never C++/WinRT headers, aliases, or helpers — each projection resolves its own includes/qualification.
+`WinUIControlCatalogAttribute` embeds the **complete control registry** compiled into `winuic.exe`: every abstract control schema (name, category, capabilities, properties, events) plus its compiled-in **WinUI 3 platform mapping** (platform type, namespace, fixed properties, per-property setters & value transforms) — plus any third-party backend controls merged in at compile time via `-c/-control <file>.json`. The catalog is **language-projection agnostic**: it contains WinRT API names only (full namespaces, bare enum member names), never language-specific spellings, aliases, or helpers — each projection resolves its own includes/qualification.
 
 - **Scope**: `<Module>` TypeDef row 1 — exactly **once** per `.winmd`, never on view classes
 - **Wire format**: identical to `WinUIAttribute` (2-byte prolog `0x0001`, SerString compressed length, UTF-8 JSON payload, `0x0000` NumNamedArgs)
@@ -1512,7 +1522,7 @@ function choose_base(view_name, layout_json):
 
 ### Per-Language Code Examples
 
-#### C# / .NET (System.Reflection.Metadata)
+#### CsWinC — C# (.NET / System.Reflection.Metadata)
 
 ```csharp
 using var pe = new PEReader(File.OpenRead("MyApp.winmd"));
@@ -1554,7 +1564,7 @@ foreach (var tdh in md.TypeDefinitions) {
 }
 ```
 
-#### C++/WinRT (IMetaDataImport2)
+#### CppWinC (IMetaDataImport2)
 
 ```cpp
 IMetaDataDispenserEx* dispenser;
@@ -1647,19 +1657,163 @@ for typedef, attrs in enumerate_winmd_types("MyApp.winmd"):
 
 ---
 
-## C++ Projection (CppWinC) — WinUIC .winmd Consumption Contract
+### Consuming winuic Types — The A-Z Language-Agnostic Contract
 
-> **Audience**: `cppwinc.exe` (C++/WinRT modules-only, fast ABI only).
-> This is the concrete, implementation-verified algorithm used by the C++
+> This is the complete, language-neutral contract for consuming **types** out
+> of a `winuic` `.winmd`. Every rule below holds for ALL projections — C++,
+> C#, Rust, Python, Swift, Kotlin, and any future binding — so that any
+> projection can reproduce the authored app **100% cleanly** without reading
+> another projection's source. Nothing here is WinUI-specific unless marked;
+> a projection for a different UI backend follows the identical contract and
+> only substitutes its own platform mapping (from the embedded control
+> catalog).
+
+#### 1. Naming & identity (the namespace switch wins)
+
+- The CLI `-namespace`/`-n` switch **overrides any derived name**: it names
+  the emitted `.winmd` file (`<ns>.winmd`), the ECMA-335 `<Module>` name
+  string, and the namespace of every emitted type. Without `-n`, the
+  sanitized module name of the first `.winui` source is used.
+- **One naming rule across the pipeline**: spaces are hyphen-joined once
+  (`WinUI Gallery` → `WinUI-Gallery`); the `-namespace`/`-n` value is used
+  verbatim. The same name forms the `.winmd`, the metadata namespace and the
+  final exe/`.pri`.
+- Every view `V` in namespace `<ns>` surfaces as:
+  - a runtime class `<ns>.V` (activatable — see §7),
+  - an `<ns>.V` marker interface used as the type's identity handle,
+  - a default constructor that materializes the whole visual tree.
+- `Extends` is intentionally **empty** in the `.winmd`. The projection MUST
+  inject the platform base class by view role (Application / top-level
+  Window / reusable component) — see the view-role table above.
+
+#### 2. The type surface of a view
+
+Each view's public WinRT surface is authored, not guessed:
+
+| `.winui` source | `.winmd` surface | Projection obligation |
+|---|---|---|
+| `@state var x: T = init` | property `T x` (get/set) | Emit a real property with initial value; writes notify dependents |
+| `@binding var x: T` | property `T x` (get/set, two-way) | Wire setter back into the owner (two-way); reads forward |
+| `@computed var y: T` | read-only property | Recompute from dependency set on any dependency write |
+| `@environment var e: T` | property with environment lookup | Resolve from the app/environment scope, fall back to default |
+| `callback onFoo(args…)` | method / event with matching signature | Emit callable member; `.onFoo { }` registrations bind to it |
+| `import`d code-behind members | not in `.winmd` | The projection (or host app) supplies implementations for referenced members |
+
+Type mapping is fixed and lossless: `string`→UTF-16 string, `int`→32-bit
+signed, `double`→IEEE-754 64-bit, `bool`→boolean, `datetime`→the platform
+instant type, `T[]`→read-write vector of `T`. Nothing may be silently
+narrowed or boxed differently per language.
+
+#### 3. Layout tree consumption (`WinUIAttribute`)
+
+The layout JSON is the single source of truth for the visual tree. For every
+control node:
+
+1. Resolve `control` through the **embedded catalog** (`abstract_name` →
+   `platform_type` + `platform_namespace`). Never hardcode the mapping.
+2. Apply `fixed_properties` first, then each `props` entry through the
+   catalog's `platform_setter` + `transform` for that property.
+3. Attach `children` according to the control's **composition kind**:
+
+   | Composition kind | Child attachment |
+   |---|---|
+   | `panel` | append to the children collection |
+   | `content` | single child through the content property (wrap multiple children in a stack) |
+   | `items` | append to the items collection (or its named variant, e.g. primary commands) |
+   | `items_panel` | append to the menu/commands items collection |
+   | `documents` | append to the inlines collection |
+   | `blocks` | append to the blocks collection |
+   | `columns` | append to the columns collection |
+   | `navigation` | first child = pane content, remaining = menu items |
+   | `navigation_item` | child goes through the item content property |
+   | `popup` | single child via the popup child property |
+   | `charts` | route each child by its own type (data / axes / series collections) |
+
+4. Value kinds in `props` are language-neutral:
+   | JSON form | Obligation |
+   |---|---|
+   | string / number / bool | constant — emit typed literal |
+   | `"$name"` | state/binding reference — route through the reactive system (§4) |
+   | `".enumValue"` | dot-enum — resolve via the catalog's enum vocabulary |
+   | `"(expr …)"` | inline expression — emit verbatim in the projection language |
+
+5. `.raw(key, value)` pairs and `Raw()` fragments carry the **verbatim XAML
+   surface** of everything the abstract model does not cover. Projections
+   MUST preserve them (as attached-property application, attribute setting,
+   or verbatim resource text) — dropping them loses authored fidelity.
+
+#### 4. Reactive binding obligations
+
+- Every `$ref` read MUST observe its source property; every two-way binding
+  MUST write back on change (toggle/slider/checkbox/text input round-trips
+  are part of the contract).
+- Conditionals (`if`/`else` nodes) and `ForEach` nodes re-evaluate on
+  dependency change: `If` swaps the subtree, `ForEach` re-materializes its
+  body per collection element.
+- Bindings are late-bound: the tree is constructed once, values flow through
+  the binding system afterwards. Projections must not constant-fold `$ref`
+  values at construction time.
+
+#### 5. Resources, templates and assets
+
+- Style/brush/template fragments authored in `.winui` travel verbatim into
+  the `.winmd` (raw pairs) and into the per-project `resources.pri` —
+  projections emit them into the resource system of their platform.
+- `winuic` copies **only the assets the project actually references**
+  (reference-only asset copying) and indexes them into `resources.pri`.
+  Projections that stage assets next to the binary MUST mirror that
+  reference-only behavior and MUST also write the package index under the
+  binary's own name (`<ExeName>.pri` next to `<ExeName>`) because unpackaged
+  MRT Core only finds `<ExeName>.pri`.
+
+#### 6. App-level hint attributes
+
+`WinUIDarkTitlebarAttribute`, `WinUIAppIconAttribute`,
+`WinUIDarkContextMenuAttribute` and `WinUITitlebarAttribute` are
+Win32-flavored capabilities with platform-neutral meaning: "this app wants a
+dark titlebar / icon / dark context menu / custom titlebar text". Each
+projection translates that intent into its platform's API (Win32 projections
+call `DwmSetWindowAttribute` / `WM_SETICON` / uxtheme ordinals; other
+platforms use their own mechanisms). The attributes never dictate a specific
+OS call inside the metadata.
+
+#### 7. Activation contract
+
+- Every emitted runtime class must be constructible by the projection's
+  activation path: packaged activations use the normal WinRT registration;
+  unpackaged projections must arrange an in-process factory (manifest
+  reg-free activation, or a local factory registry consulted before
+  `RoActivateInstance`) so `<ns>.V()` works without any install step.
+- View construction order is deterministic: state properties first (with
+  defaults), then the visual tree per `WinUIAttribute`, then bindings attach.
+  Event callbacks may fire during construction only if the platform can
+  deliver them (guard with the same readiness rules the platform requires).
+
+#### 8. Determinism guarantees a projection may rely on
+
+- The `.winmd` contains **no language-specific constructs**: no textual
+  includes, no per-language type spellings, no code-generation artifacts.
+  Every language decision lives in the consuming projection.
+- The same inputs always produce the same `.winmd` bytes (parallel batching
+  does not change output), so projections may cache aggressively.
+- The control catalog attribute is the **authoritative** control surface;
+  when compiler and document disagree, the catalog wins.
+
+---
+
+## [CppWinC](https://github.com/mominshaikhdev/CppWinC-Compiler) Projection — WinUIC .winmd Consumption Contract
+
+> **Audience**: [**CppWinC**](https://github.com/mominshaikhdev/CppWinC-Compiler) (`cppwinc.exe`) — C++23 named modules, fast ABI only.
+> This is the concrete, implementation-verified algorithm used by the CppWinC
 > projection to turn a WinUIC `.winmd` into a compiling WinUI 3 app
-> (see [`cppwinc/README.md`](cppwinc/README.md) and
-> [`WinUI-Gallery/README.md`](WinUI-Gallery/README.md)).
+> (see [`cppwinc/README.md`]([cppwinc/README.md](https://github.com/mominshaikhdev/CppWinC-Compiler/README.md)) and
+> [`WinUI-Gallery/README.md`]([WinUI-Gallery/README.md](https://github.com/microsoft/WinUI-Gallery/README.md))).
 > Everything below is **projection knowledge** — none of it lives in the
 > `.winmd` itself.
 
 ### 1. WinMD loading
 
-- Load all input winmds into one cache: `out\WinUIGallery.winmd` (authored
+- Load all input winmds into one cache: `out\WinUI-Gallery.winmd` (authored
   module) + platform winmds (WASDK WinUI, Foundation, InteractiveExperiences,
   WebView2, Windows SDK).
 - **Read the control catalog exactly once** from the authored module's
@@ -1853,30 +2007,32 @@ that exists in the input metadata (third-party controls merged via WinUIC's
 `Microsoft.UI.Xaml.Markup`, `Microsoft.UI.Xaml.XamlTypeInfo` for the App
 class. All of these are emitted as named C++23 modules, not headers.
 
+## Registry override hatch (`"override": true`)
+
+Third-party registry JSON files are merged **official-first** by default: a
+JSON entry may *extend* a built-in control (extra properties/events/fixed
+mappings) but never hijacks its platform type, namespace, or existing
+mappings, and it cannot flip `accepts_children` / `accepts_text_content` on
+an official control.
+
+When an official control is poorly implemented in the built-in registry, a
+registry entry can opt out of the merge with an explicit per-control flag:
+
+```json
+{ "abstract_name": "RichTextBlock", "platform_type": "RichTextBlock",
+  "override": true,
+  "properties": [ ... replaces the official list ... ],
+  "events":     [ ... ] }
+```
+
+`"override": true` **replaces** the official definition wholesale — schema
+(properties, events, capability flags) and backend (platform type, namespace,
+mappings, fixed properties). Everything else keeps the extend-never-hijack
+behavior.
+
 ## Related Projects
 
 | Project | Description |
 |---|---|
 | [Xaml2WinUIC-compiler](https://github.com/mominshaikhdev/Xaml2WinUIC-compiler) | XAML-to-`.winui` transpiler — converts WinUI 3 XAML markup into the `.winui` DSL |
-| [CppWinC-compiler](https://github.com/mominshaikhdev/cppwinc-compiler) | C++23 named-module WinRT projection — consumes `.winmd` from `WinUIC` and emits compilable `.ixx` modules |
-
----
-
-| App | `.winui` Files | `.winmd` | resources.pri | C++ Modules | `.raw()` Remaining |
-|---|---|---|---|---|---|
-| **MetaScrub** | 7 | 1 | ✅ 99KB | 32 | 0 |
-| **WinUI Gallery** | 190 | 1 | ✅ 56KB | 185 | 0 |
-
-Key verification results:
-- All 190 WinUI Gallery `.winui` files compile cleanly into a single `.winmd` + `resources.pri`
-- Zero `.raw()` calls in generated C++ — every property resolves to proper WinUI API calls
-- All enums resolve: VerticalAlignment, HorizontalAlignment, Visibility, FontWeight, Thickness, Orientation, TextAlignment, TextWrapping, TextTrimming
-- All color formats resolve: Hex (#RRGGBB), HSL, HSLA, Display P3, OKLCH
-- Glob pattern expansion: `*.winui` patterns work even when the shell doesn't expand them
-- Recursive directory scanning: pass a directory and all `.winui` files are processed
-- No hardcoded drive letters: all paths use `%ProgramFiles%` / `getenv()` — works on any Windows machine
-- **3rd-party control registry** (`winui.json`): 50 controls from WinUIEssentials, CommunityToolkit.WinUI3, LiveCharts2, OxyPlot, WebView2
-- **XAML TemplatedControls** (`type: xaml`): catalog carries `template_resource_key` and `resource_dictionary` for downstream projections
-- **C++/WinRT components** (`type: cpp`): direct instantiation, no XAML plumbing
-- **JSON property merge**: JSON properties are always merged into existing built-in controls (e.g. CommunityToolkit's `isMarkdownEnabled` added to built-in `RichTextBlock`)
-- **resources.pri**: correctly packages layout JSON and assets for all controls including 3rd-party
+| [CppWinC](https://github.com/mominshaikhdev/CppWinC-Compiler) | C++23 named modules projection — consumes `.winmd` from `WinUIC` and emits compilable `.ixx` modules |

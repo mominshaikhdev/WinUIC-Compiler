@@ -994,7 +994,18 @@ private:
         auto name = (pos != std::string_view::npos) ? path.substr(pos+1) : path;
         auto dot = name.find('.');
         if (dot != std::string_view::npos) name = name.substr(0, dot);
-        return std::string(name);
+        // App/assembly names arrive from project folder and file names
+        // ("WinUI3-Gallery", "My App"): spaces are illegal in ECMA-335
+        // identifiers and metadata namespaces, so the module name (which
+        // names the emitted .winmd) hyphen-joins them once ("My App" ->
+        // "My-App"). Existing hyphens are kept - the default spelling of a
+        // spaced app name is the hyphen-joined one ("WinUI Gallery" ->
+        // "WinUI-Gallery"); a namespace switch (-n) overrides it verbatim.
+        // C++-side projections apply the identical rule to exe/pri names.
+        std::string out(name);
+        for (auto& c : out)
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') c = '-';
+        return out;
     }
 };
 

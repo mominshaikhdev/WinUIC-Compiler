@@ -38,6 +38,14 @@ public:
         -> std::vector<WinMdFile> {
         std::vector<WinMdFile> files;
         auto ns = namespace_name.empty() ? mod.name : namespace_name;
+        // The namespace also names the emitted .winmd
+        // ("WinUI Gallery" -> "WinUI-Gallery.winmd") and the metadata
+        // module string, so spaces are hyphen-joined here once - every
+        // downstream projection (cppwinc exe/pri names included) applies
+        // the identical rule. Existing hyphens are preserved, and a
+        // namespace switch (-n) overrides the default verbatim.
+        for (auto& ch : ns)
+            if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') ch = '-';
 
         // ECMA-335 PE Binary WinMD Metadata
         WinMdFile file;

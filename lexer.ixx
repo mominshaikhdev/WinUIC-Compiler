@@ -371,6 +371,13 @@ private:
                     v += "\\("; // string interpolation marker
                 } else if (e == '"') {
                     v += '"';   // \" → " (quoted text round-trips exactly)
+                } else if (e == '\\') {
+                    if (!eof() && ch() == '"') {
+                        eat();
+                        v += "\\\"";
+                    } else {
+                        v += "\\\\";
+                    }
                 } else if (e == 'u') {
                     // \uXXXX → glyph escape ONLY when exactly 4 hex digits
                     // follow (e.g. "\uE74E"). Otherwise the backslash is a

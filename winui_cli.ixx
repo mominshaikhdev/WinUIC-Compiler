@@ -75,6 +75,10 @@ inline auto print_help(char const* prog) -> void {
     std::println("  -v, -verbose          Verbose logging output");
     std::println("  -h, -help             Show this help text");
     std::println("");
+    std::println("ASSETS & LICENSE:");
+    std::println("  Any LICENSE file present in the source input directories is");
+    std::println("  automatically copied to the output directory.");
+    std::println("");
     std::println("PATHS:");
     std::println("  File paths use single backslashes as separators, e.g.");
     std::println("  ..\\..\\a\\b\\c\\page — forward slashes and double backslashes");
@@ -217,7 +221,15 @@ struct CliOptions {
         }
         else if (arg == "-namespace" || arg == "-n") {
             if (++i >= argc) { error("-namespace requires a value"); return std::nullopt; }
+            // Default naming rule: spaces are hyphen-joined once ("WinUI
+            // Gallery" -> "WinUI-Gallery") - this value names the emitted
+            // .winmd, the metadata namespace and the project, and cppwinc
+            // applies the identical rule to exe/pri names downstream.
+            // The switch itself is the override: any other spelling the user
+            // types (-n WinUI_Gallery) is kept exactly as written.
             opts.ns = argv[i];
+            for (auto& c : opts.ns)
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') c = '-';
         }
         else if (arg == "-project" || arg == "-p") {
             if (++i >= argc) { error("-project requires a value"); return std::nullopt; }
@@ -968,6 +980,8 @@ inline auto run(int argc, char** argv) -> int {
         for (auto const& f : opts->input_files) {
             std::filesystem::path p = std::filesystem::absolute(f);
             auto dir = p.parent_path();
+            add_root(dir.string());
+            if (!dir.parent_path().empty()) add_root(dir.parent_path().string());
             for (int d = 0; d < 3 && !dir.empty(); ++d) {
                 std::error_code ec;
                 if (std::filesystem::is_directory(dir / "Assets", ec))
@@ -1053,6 +1067,15 @@ inline auto run(int argc, char** argv) -> int {
         } else {
             if (opts->verbose)
                 std::println("[winui] No asset references found in .winui sources — nothing copied");
+        }
+        for (auto const& src_root : src_roots) {
+            auto lic = std::filesystem::path(src_root) / "LICENSE";
+            if (std::filesystem::exists(lic)) {
+                std::error_code lec;
+                std::filesystem::copy_file(lic, std::filesystem::path(opts->output_dir) / "LICENSE",
+                    std::filesystem::copy_options::overwrite_existing, lec);
+                break;
+            }
         }
     }
 
