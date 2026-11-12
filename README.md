@@ -18,7 +18,7 @@ A framework-agnostic, declarative UI domain-specific language (DSL) for **WinUI 
    - [F — ForEach Iteration](#f--foreach-iteration)
    - [G — Grammar EBNF Specification](#g--grammar-ebnf-specification)
    - [H — Header Imports](#h--header-imports)
-   - [I — If/Else & Interpolated Strings](#i--ifelse--interpolated-strings)
+   - [I — If/Else & String Expressions](#i--ifelse--string-expressions)
    - [K — Keywords Catalog](#k--keywords-catalog)
    - [L — Literals & Lexical Rules](#l--literals--lexical-rules)
    - [M — Modifiers Catalog](#m--modifiers-catalog)
@@ -290,7 +290,7 @@ Dot-prefixed directives placed before any `export view` declaration configure ap
 | **`.darkTitlebar`** | `.darkTitlebar;` | Sets titlebar theme to dark (`AppTitleBarTheme::Dark`) |
 | **`.darkContextMenu`** | `.darkContextMenu;` | Enables dark-themed right-click context menus. Follows dark mode automatically — when `.darkTitlebar` is set, context menus are dark too |
 | **`.titlebar`** | `.titlebar("text");` | Sets the global window title. Supports UTF-8 text including emojis (converted to `wstring` at runtime) |
-| **`.appIcon`** | `.appIcon("path\\icon.ico");` | Sets the application icon for titlebar, taskbar, and Alt+Tab |
+| **`.appIcon`** | `.appIcon("path\icon.ico");` | Sets the application icon for titlebar, taskbar, and Alt+Tab |
 | **`.backdrop`** | `.backdrop(mica);` or `.backdrop(acrylic);` | Sets the window backdrop material |
 
 **Example:**
@@ -299,8 +299,8 @@ Dot-prefixed directives placed before any `export view` declaration configure ap
 .extendContentIntoTitleBar;
 .darkTitlebar;
 .darkContextMenu;
-.titlebar("My App \xF0\x9F\x9A\x80");
-.appIcon("assets\\icon.ico");
+.titlebar("My App 🚀");
+.appIcon("assets\icon.ico");
 .backdrop(mica);
 
 export view MainWindow
@@ -357,7 +357,7 @@ export view ItemList {
     body {
         Column(spacing: 8) {
             ForEach(0...5) { index in
-                Label("Item \(index)")
+                Label("Item " + index)
                     .fontSize(14)
             }
         }
@@ -396,7 +396,7 @@ ViewNodeBlock    ::= ( BodyItem | PropertyAssign | ClosureExpr )*
 Modifier         ::= '.' IDENT ( '(' ArgList? ')' )? ( '{' ClosureExpr '}' )?
                  |  '.' 'raw' '(' STRING ',' STRING ')'      // verbatim XAML attribute (universal)
 
-RawFragment      ::= 'Raw' '(' ')' Modifier*                 // verbatim XAML subtree view (e.g. .raw("Resource", "<Style …/>"))
+RawFragment      ::= 'Raw' '(' ')' Modifier*                 // verbatim XAML subtree view (e.g. .raw("Resource", """<Style …/>"""))
 
 ConditionalView  ::= 'if' Expr '{' BodyItem* '}' ( 'else' 'if' Expr '{' BodyItem* '}' )* ( 'else' '{' BodyItem* '}' )?
 ForEachNode      ::= 'ForEach' '(' Expr ')' '{' IDENT 'in' BodyItem* '}'
@@ -420,7 +420,7 @@ DotEnumExpr      ::= '.' IDENT
 RangeExpr        ::= Expr ( '...' | '..<' ) Expr
 ArrayLitExpr     ::= '[' ( Expr ( ',' Expr )* )? ']'
 SubscriptExpr    ::= Expr '[' Expr ']'
-InterpolatedStr  ::= '"' ( StringChar | '\(' Expr ')' )* '"'
+StringLit        ::= '"' StringChar* '"' | '"""' RawChar* '"""'
 
 Stmt             ::= AssignStmt | ExprStmt | IfStmt | VarStmt | ReturnStmt | WhileStmt | SwitchStmt
 AssignStmt       ::= Expr ( '=' | '+=' | '-=' | '*=' | '/=' ) Expr ';'
@@ -438,13 +438,16 @@ ReturnStmt       ::= 'return' Expr? ';'
 Import symbols from external modular `.winui` files:
 
 ```winui
-import { HeaderView, UserAvatar } from "components/header.winui";
-import { ThemeManager } from "core/theme.winui";
+import { HeaderView, UserAvatar } from "components\header";
+import { ThemeManager } from "core\theme";
 ```
+
+> [!NOTE]
+> Specifying the `.winui` extension manually is optional — `winuic` automatically resolves imports with or without the `.winui` extension (e.g. `"components\header"` resolves to `"components\header.winui"`).
 
 ---
 
-### I — If/Else & Interpolated Strings
+### I — If/Else & String Expressions
 
 #### 1. Conditional View Trees (`if / else if / else`)
 Show or hide controls dynamically based on boolean state, with optional `else if` chains:
@@ -461,12 +464,12 @@ if count > 10 {
 }
 ```
 
-#### 2. Interpolated Strings (`\(expr)`)
-Embed expressions dynamically inside string literals:
+#### 2. String Concatenation & Expressions
+Combine state and expressions seamlessly inside labels and properties:
 
 ```winui
-Label("Current count: \(count + 1)")
-Label("User: \(root.username)")
+Label("Current count: " + (count + 1))
+Label("User: " + root.username)
 ```
 
 #### 3. Ternary Expression (`cond ? then : else`)
@@ -505,7 +508,9 @@ Label(username ?? "Guest")
 - **Comments**:
   - Line comment: `// Single line comment`
   - Block comment: `/* Multi line comment */`
-- **String Literals**: Enclosed in double quotes `"Hello World"`, supporting `\(` (interpolation marker, see §I), `\"` (escaped quote, round-trips exactly) and `\uXXXX` (Segoe MDL2 glyph escape, only when exactly 4 hex digits follow).
+- **String Literals**:
+  - Double quotes `"Hello World"`, supporting `\"` (escaped quote, round-trips exactly) and `\uXXXX` (Segoe MDL2 glyph escape, only when exactly 4 hex digits follow). String concatenation uses standard `+` (e.g. `"Item " + index`, see §I).
+  - Raw multiline triple quotes `"""..."""`: Preserves real newlines, quotes, and indentation verbatim without requiring `\"` or `\n` escaping. Ideal for verbatim XML fragments, resources, and multiline payloads.
 - **Backslash is literal**: `\` is a plain character inside strings — Windows paths use a single `\`: `Image(source: "assets\icon.png")`. (JSON-style `\\`, `\n`, `\t` escapes are NOT interpreted.)
 - **Path separators**: `\` is the only legal path separator in `.winui` source. `\` remains literal everywhere; `/` is rejected by the compiler on path-like properties (`uri` / `bitmap_image` transforms) unless it is part of an `https://` or `ms-appx://` URI (case-insensitive):
   - ✅ `Image(source: "assets\icon.png")`
@@ -600,7 +605,7 @@ Ranges create numeric sequences for iteration or slider bounds:
 
 ```winui
 ForEach(1...5) { step in
-    Label("Step \(step)")
+    Label("Step " + step)
 }
 ```
 
@@ -662,7 +667,13 @@ export view AppHeader {
 ```winui
 export view AppResources {
     body {
-        Raw() .raw("Resource", "<ResourceDictionary><ResourceDictionary.MergedDictionaries><XamlControlsResources xmlns=\"using:Microsoft.UI.Xaml.Controls\"/></ResourceDictionary.MergedDictionaries></ResourceDictionary>")
+        Raw() .raw("Resource", """
+            <ResourceDictionary>
+                <ResourceDictionary.MergedDictionaries>
+                    <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                </ResourceDictionary.MergedDictionaries>
+            </ResourceDictionary>
+            """)
     }
 }
 ```
@@ -683,7 +694,7 @@ export view CounterWidget {
     body {
         Card(elevation: 4, cornerRadius: 8) {
             Column(spacing: 16, padding: 20) {
-                Label("Counter: \(count)")
+                Label("Counter: " + count)
                     .bold()
                     .fontSize(24)
                     .alignment(.center)
@@ -810,7 +821,7 @@ export view DataProcessor {
 
     body {
         Column(spacing: 16, padding: 20) {
-            Label("Result: \(result)").bold()
+            Label("Result: " + result).bold()
 
             Button("Calculate") {
                 // While loop with compound multiply-assign
@@ -860,7 +871,7 @@ export view UserProfile {
             Label("Profile").bold().fontSize(24)
             Input(text: $firstName, placeholder: "First name")
             Input(text: $lastName, placeholder: "Last name")
-            Label("Hello, \(firstName)!")
+            Label("Hello, " + firstName + "!")
                 .foregroundColor(accentColor ?? "Accent")
         }
     }
@@ -885,7 +896,7 @@ export view UserProfile {
  [WinMD Emitter] ──> Direct ECMA-335 Binary PE Metadata (.winmd) & In-RAM PRI Encoder
 ```
 
-- **Lexer (`lexer.ixx`)**: Lexical tokenization supporting Unicode glyph escapes, string interpolation (`\(` ... `\)`), and numerical range tokens (`...`, `..<`).
+- **Lexer (`lexer.ixx`)**: Lexical tokenization supporting Unicode glyph escapes, string concatenation expressions, and numerical range tokens (`...`, `..<`).
 - **Pratt Parser (`parser.ixx`)**: Top-down operator precedence parsing for expressions, view hierarchies, closures, and state declarations.
 - **Control Registry (`registry.ixx`)**: Central database containing 24 built-in WinUI controls alongside **Dynamic Custom Control Synthesis**.
 - **Semantic Analyzer (`semantic.ixx`)**: AST validation, scope analysis, two-way `$binding` resolution, state property indexing, and IR lowering.
@@ -1014,14 +1025,14 @@ The conformance attributes (`DefaultAttribute`, `GuidAttribute`, `ActivatableAtt
 #### Language-neutral walk pseudocode
 
 ```text
-// ── Phase 0: module-scoped catalog (read ONCE, from <Module> TypeDef row 1) ──
+// Phase 0: module-scoped catalog (read ONCE, from <Module> TypeDef row 1)
 for each CustomAttribute row CA where Parent resolves to TypeDef row 1:
     attr_name = resolve_type_name(CA.Type)
     if attr_name == "WinUIControlCatalogAttribute":
         catalog = json_decode(custom_attr_string(blobs[CA.Value]))
         control_table = build_control_table(catalog)   // abstract → platform map
 
-// ── Phase 1: per-view attributes ──
+// Phase 1: per-view attributes
 for each TypeDef row T where T.Flags has tdWindowsRuntime:
     view_name = strings[T.Name]
     for each CustomAttribute row CA where Parent resolves to T:
@@ -1043,26 +1054,19 @@ for each TypeDef row T where T.Flags has tdWindowsRuntime:
 
 #### Blob wire format — `WinUIAttribute` (single string argument)
 
-```
-Offset   Size   Content
-------   ----   -------
-0        2      Prolog: 0x0001 (little-endian, ECMA-335 §23.3 fixed prefix)
-2        var    SerString: ECMA-335 compressed-length + UTF-8 payload
-  2+0    1|2    Compressed string length:
-                  • If byte & 0x80 == 0 → 1-byte length (0x00–0x7F)
-                  • If byte & 0x80 != 0 → 2-byte length: ((b0 & 0x7F) << 8) | b1
-  2+L    n      Raw UTF-8 bytes of the JSON layout string
-last     2      NumNamedArgs: 0x0000
-```
+| Offset | Size | Content | Description |
+| :--- | :--- | :--- | :--- |
+| `0` | `2` | Prolog | `0x0001` (little-endian, ECMA-335 §II.23.3 fixed prefix) |
+| `2` | `1 \| 2 \| 4` | Length (`L`) | ECMA-335 §II.23.2 compressed unsigned integer byte length of payload (`L` bytes):<br>• If `b0 & 0x80 == 0` → 1-byte length: `b0` (`0x00`–`0x7F`)<br>• If `(b0 & 0xC0) == 0x80` → 2-byte length: `((b0 & 0x3F) << 8) \| b1` (`0x0080`–`0x3FFF`)<br>• If `(b0 & 0xE0) == 0xC0` → 4-byte length: `((b0 & 0x1F) << 24) \| (b1 << 16) \| (b2 << 8) \| b3` (`0x4000`–`0x1FFFFFFF`) |
+| `2 + L` | `N` | Payload | Raw UTF-8 bytes of the JSON layout string (`N` bytes, where `N == Length`) |
+| `2 + L + N` | `2` | NumNamedArgs | `0x0000` (no named arguments) |
 
 #### Blob wire format — marker attributes (no arguments)
 
-```
-Offset   Size   Content
-------   ----   -------
-0        2      Prolog: 0x0001
-2        2      NumNamedArgs: 0x0000
-```
+| Offset | Size | Content | Description |
+| :--- | :--- | :--- | :--- |
+| `0` | `2` | Prolog | `0x0001` (little-endian, ECMA-335 §II.23.3 fixed prefix) |
+| `2` | `2` | NumNamedArgs | `0x0000` (no named arguments) |
 
 ---
 
@@ -1187,7 +1191,6 @@ The decoded string is a **JSON array** of body nodes representing the complete v
 
 - **Scope**: `<Module>` TypeDef row 1 — exactly **once** per `.winmd`, never on view classes
 - **Wire format**: identical to `WinUIAttribute` (2-byte prolog `0x0001`, SerString compressed length, UTF-8 JSON payload, `0x0000` NumNamedArgs)
-- **Size**: ~60 KB for the full 104-control catalog (24 legacy abstracts + 80 real WinUI 3 controls)
 
 #### Top-level shape
 

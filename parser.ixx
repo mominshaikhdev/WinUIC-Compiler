@@ -668,8 +668,9 @@ private:
         if (check(tk::TokenKind::Equal))           { aop = ast::AssignOp::Assign;    is_assign = true; advance(); }
         else if (check(tk::TokenKind::PlusEqual))  { aop = ast::AssignOp::AddAssign; is_assign = true; advance(); }
         else if (check(tk::TokenKind::MinusEqual)) { aop = ast::AssignOp::SubAssign; is_assign = true; advance(); }
-        else if (check(tk::TokenKind::StarEqual))  { aop = ast::AssignOp::MulAssign; is_assign = true; advance(); }
-        else if (check(tk::TokenKind::SlashEqual)) { aop = ast::AssignOp::DivAssign; is_assign = true; advance(); }
+        else if (check(tk::TokenKind::StarEqual))    { aop = ast::AssignOp::MulAssign; is_assign = true; advance(); }
+        else if (check(tk::TokenKind::SlashEqual))   { aop = ast::AssignOp::DivAssign; is_assign = true; advance(); }
+        else if (check(tk::TokenKind::PercentEqual)) { aop = ast::AssignOp::ModAssign; is_assign = true; advance(); }
 
         if (is_assign) {
             auto val = parse_expr_ptr();
@@ -832,7 +833,8 @@ private:
             case tk::TokenKind::Plus:
             case tk::TokenKind::Minus:            return {9, 10};
             case tk::TokenKind::Star:
-            case tk::TokenKind::Slash:            return {11, 12};
+            case tk::TokenKind::Slash:
+            case tk::TokenKind::Percent:          return {11, 12};
             case tk::TokenKind::DotDotDot:
             case tk::TokenKind::DotDotLess:       return {0, 1}; // lowest
             default:                              return {-1, -1}; // not infix
@@ -845,6 +847,7 @@ private:
             case tk::TokenKind::Minus:            return ast::BinaryOp::Sub;
             case tk::TokenKind::Star:             return ast::BinaryOp::Mul;
             case tk::TokenKind::Slash:            return ast::BinaryOp::Div;
+            case tk::TokenKind::Percent:          return ast::BinaryOp::Mod;
             case tk::TokenKind::EqualEqual:       return ast::BinaryOp::Eq;
             case tk::TokenKind::BangEqual:        return ast::BinaryOp::Neq;
             case tk::TokenKind::Less:             return ast::BinaryOp::Lt;
@@ -1154,6 +1157,8 @@ private:
     // Utility
 
     static auto strip_q(std::string_view s) -> std::string {
+        if (s.size() >= 6 && s.starts_with("\"\"\"") && s.ends_with("\"\"\""))
+            return std::string(s.substr(3, s.size() - 6));
         if (s.size()>=2 && s.front()=='"' && s.back()=='"')
             return std::string(s.substr(1, s.size()-2));
         return std::string(s);

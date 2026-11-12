@@ -64,13 +64,14 @@ enum class TokenKind : std::uint8_t {
     Hash,              // #  (version directive)
 
     // Operators
-    Plus, Minus, Star, Slash,
+    Plus, Minus, Star, Slash, Percent,
     Equal, EqualEqual, BangEqual,
     Less, LessEqual, Greater, GreaterEqual,
     Bang, AmpAmp, PipePipe,
     PlusEqual, MinusEqual,
     StarEqual,         // *=
     SlashEqual,        // /=
+    PercentEqual,      // %=
     Question,          // ?   (ternary condition)
     QuestionQuestion,  // ??  (null-coalescing / default-value)
 
@@ -138,6 +139,7 @@ enum class TokenKind : std::uint8_t {
         case TokenKind::Minus:              return "'-'";
         case TokenKind::Star:               return "'*'";
         case TokenKind::Slash:              return "'/'";
+        case TokenKind::Percent:            return "'%'";
         case TokenKind::Equal:              return "'='";
         case TokenKind::EqualEqual:         return "'=='";
         case TokenKind::BangEqual:          return "'!='";
@@ -152,6 +154,7 @@ enum class TokenKind : std::uint8_t {
         case TokenKind::MinusEqual:         return "'-='";
         case TokenKind::StarEqual:          return "'*='";
         case TokenKind::SlashEqual:         return "'/='";
+        case TokenKind::PercentEqual:       return "'%='";
         case TokenKind::Question:           return "'?'";
         case TokenKind::QuestionQuestion:   return "'??'";
         case TokenKind::EndOfFile:          return "end of file";
@@ -247,6 +250,7 @@ private:
     [[nodiscard]] auto eof()  const noexcept -> bool { return m_pos >= m_src.size(); }
     [[nodiscard]] auto ch()   const noexcept -> char { return eof() ? '\0' : m_src[m_pos]; }
     [[nodiscard]] auto ch1()  const noexcept -> char { return m_pos+1 < m_src.size() ? m_src[m_pos+1] : '\0'; }
+    [[nodiscard]] auto ch2()  const noexcept -> char { return m_pos+2 < m_src.size() ? m_src[m_pos+2] : '\0'; }
 
     auto eat() noexcept -> char {
         char c = m_src[m_pos++];
@@ -317,6 +321,7 @@ private:
         if (c == '-') { return eat_if('=') ? tok(TokenKind::MinusEqual,   "-=",sl,sc) : tok(TokenKind::Minus,   "-",sl,sc); }
         if (c == '*') { return eat_if('=') ? tok(TokenKind::StarEqual,    "*=",sl,sc) : tok(TokenKind::Star,    "*",sl,sc); }
         if (c == '/') { return eat_if('=') ? tok(TokenKind::SlashEqual,   "/=",sl,sc) : tok(TokenKind::Slash,   "/",sl,sc); }
+        if (c == '%') { return eat_if('=') ? tok(TokenKind::PercentEqual, "%=",sl,sc) : tok(TokenKind::Percent, "%",sl,sc); }
 
         // Logical operators
         if (c == '&' && eat_if('&')) return tok(TokenKind::AmpAmp,  "&&", sl, sc);
@@ -330,7 +335,14 @@ private:
 
         if (c == '@') return scan_attr(sl, sc);
         if (c == '$') return scan_dollar(sl, sc);
-        if (c == '"') return scan_string(sl, sc);
+        if (c == '"') {
+            if (ch() == '"' && ch1() == '"') {
+                eat(); // consume 2nd "
+                eat(); // consume 3rd "
+                return scan_triple_string(sl, sc);
+            }
+            return scan_string(sl, sc);
+        }
         if (is_d(c))  return scan_number(c, sl, sc);
         if (is_a(c))  return scan_ident(c, sl, sc);
 
@@ -358,6 +370,19 @@ private:
             return tok(TokenKind::Error, "$", sl, sc);
         }
         return tok(TokenKind::Dollar, "$" + n, sl, sc);
+    }
+
+    auto scan_triple_string(std::size_t sl, std::size_t sc) -> Token {
+        std::string v;
+        while (!eof()) {
+            if (ch() == '"' && ch1() == '"' && ch2() == '"') {
+                eat(); eat(); eat(); // consume closing """
+                return tok(TokenKind::StringLiteral, "\"\"\"" + v + "\"\"\"", sl, sc);
+            }
+            v += eat();
+        }
+        m_diag.error({.file=m_file, .line=sl, .column=sc}, "unterminated triple-quoted string");
+        return tok(TokenKind::Error, v, sl, sc);
     }
 
     auto scan_string(std::size_t sl, std::size_t sc) -> Token {
