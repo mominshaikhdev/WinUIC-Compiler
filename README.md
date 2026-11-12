@@ -1119,7 +1119,7 @@ The decoded string is a **JSON array** of body nodes representing the complete v
 
 #### Abstract control → platform mapping
 
-| Abstract name | WinUI3 (CppWinC) | Qt | Web |
+| Abstract name | WinUI3 ([CppWinC](https://github.com/mominshaikhdev/CppWinC-Compiler)) | Qt | Web |
 |---|---|---|---|
 | `Column` | `StackPanel` (Vertical) | `QVBoxLayout` | `flex-col div` |
 | `Row` | `StackPanel` (Horizontal) | `QHBoxLayout` | `flex-row div` |
@@ -1804,13 +1804,14 @@ OS call inside the metadata.
 
 ---
 
-## [CppWinC](https://github.com/mominshaikhdev/CppWinC-Compiler) Projection — WinUIC .winmd Consumption Contract
+<a id="c-projection-cppwinc--winuic-winmd-consumption-contract"></a>
+## C++ Projection ([CppWinC](https://github.com/mominshaikhdev/CppWinC-Compiler)) — WinUIC .winmd Consumption Contract
 
 > **Audience**: [**CppWinC**](https://github.com/mominshaikhdev/CppWinC-Compiler) (`cppwinc.exe`) — C++23 named modules, fast ABI only.
 > This is the concrete, implementation-verified algorithm used by the CppWinC
 > projection to turn a WinUIC `.winmd` into a compiling WinUI 3 app
-> (see [`cppwinc/README.md`]([cppwinc/README.md](https://github.com/mominshaikhdev/CppWinC-Compiler/README.md)) and
-> [`WinUI-Gallery/README.md`]([WinUI-Gallery/README.md](https://github.com/microsoft/WinUI-Gallery/README.md))).
+> (see [`cppwinc/README.md`](https://github.com/mominshaikhdev/CppWinC-Compiler) and
+> [`WinUI-Gallery/README.md`](https://github.com/microsoft/WinUI-Gallery))).
 > Everything below is **projection knowledge** — none of it lives in the
 > `.winmd` itself.
 
