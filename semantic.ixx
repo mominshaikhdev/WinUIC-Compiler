@@ -450,6 +450,11 @@ private:
                             .expr_text = std::format("{}.{}", e->value_name, node.member),
                             .type     = ast::TypeKind::String};
                     }
+                    if (auto* expr = std::get_if<ir::IrExpr>(&obj_val)) {
+                        return ir::IrExpr{
+                            .expr_text = std::format("{}.{}", expr->expr_text, node.member),
+                            .type = expr->type};
+                    }
                     return ir::IrLiteral{
                         .value = std::format("<access>.{}", node.member),
                         .type = ast::TypeKind::String};
@@ -604,6 +609,18 @@ private:
         return ir_cl;
     }
 
+    static auto member_target_path(ast::Expr const& expr) -> std::optional<std::string> {
+        if (auto* id = expr.as<ast::IdentExpr>())
+            return id->name;
+        if (auto* member = expr.as<ast::MemberExpr>()) {
+            if (!member->object) return std::nullopt;
+            auto object_path = member_target_path(*member->object);
+            if (!object_path) return std::nullopt;
+            return *object_path + "." + member->member;
+        }
+        return std::nullopt;
+    }
+
     auto lower_stmt(ast::Stmt const& stmt) -> std::optional<ir::IrAction> {
         return stmt.visit([&](auto const& node) -> std::optional<ir::IrAction> {
             using T = std::decay_t<decltype(node)>;
@@ -613,13 +630,13 @@ private:
                 std::string target_name;
                 std::string target_obj;
                 if (node.target) {
-                    if (auto* id = node.target->as<ast::IdentExpr>())
-                        target_name = id->name;
-                    else if (auto* mem = node.target->as<ast::MemberExpr>()) {
-                        target_name = mem->member;
-                        if (mem->object) {
-                            if (auto* obj_id = mem->object->as<ast::IdentExpr>())
-                                target_obj = obj_id->name;
+                    if (auto target_path = member_target_path(*node.target)) {
+                        auto last_dot = target_path->rfind('.');
+                        if (last_dot == std::string::npos) {
+                            target_name = std::move(*target_path);
+                        } else {
+                            target_obj = target_path->substr(0, last_dot);
+                            target_name = target_path->substr(last_dot + 1);
                         }
                     }
                 }
@@ -714,8 +731,7 @@ private:
         });
     }
 
-    // Lower a statement to an IrInnerAction (for use inside IrIfAction bodies).
-    // Returns std::nullopt for IfStmt (no nesting) and unsupported stmts.
+    // Lower a statement to an IrInnerAction (for use inside conditional bodies).
     auto lower_stmt_as_inner(ast::Stmt const& stmt) -> std::optional<ir::IrInnerAction> {
         return stmt.visit([&](auto const& node) -> std::optional<ir::IrInnerAction> {
             using T = std::decay_t<decltype(node)>;
@@ -724,13 +740,13 @@ private:
                 std::string target_name;
                 std::string target_obj;
                 if (node.target) {
-                    if (auto* id = node.target->as<ast::IdentExpr>())
-                        target_name = id->name;
-                    else if (auto* mem = node.target->as<ast::MemberExpr>()) {
-                        target_name = mem->member;
-                        if (mem->object) {
-                            if (auto* obj_id = mem->object->as<ast::IdentExpr>())
-                                target_obj = obj_id->name;
+                    if (auto target_path = member_target_path(*node.target)) {
+                        auto last_dot = target_path->rfind('.');
+                        if (last_dot == std::string::npos) {
+                            target_name = std::move(*target_path);
+                        } else {
+                            target_obj = target_path->substr(0, last_dot);
+                            target_name = target_path->substr(last_dot + 1);
                         }
                     }
                 }
@@ -751,6 +767,29 @@ private:
                     }
                 }
                 return std::nullopt;
+            }
+            else if constexpr (std::is_same_v<T, ast::IfStmt>) {
+                ir::IrInnerIfAction ifa;
+                ifa.condition_lhs = node.condition
+                    ? lower_value(*node.condition)
+                    : ir::IrLiteral{.value = true, .type = ast::TypeKind::Bool};
+                ifa.condition_op = ast::BinaryOp::Neq;
+                ifa.condition_rhs = ir::IrLiteral{.value = false, .type = ast::TypeKind::Bool};
+                ifa.location = node.location;
+                for (auto const& child : node.then_body) {
+                    if (child) {
+                        auto action = lower_stmt_as_inner(*child);
+                        if (action) ifa.then_body.push_back(std::move(*action));
+                    }
+                }
+                for (auto const& child : node.else_body) {
+                    if (child) {
+                        auto action = lower_stmt_as_inner(*child);
+                        if (action) ifa.else_body.push_back(std::move(*action));
+                    }
+                }
+                return ir::IrInnerAction{
+                    std::make_shared<ir::IrInnerIfAction>(std::move(ifa))};
             }
             else {
                 return std::nullopt;

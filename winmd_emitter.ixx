@@ -179,21 +179,18 @@ private:
             if constexpr (std::is_same_v<T, ir::IrLiteral>) {
                 return std::visit([](auto const& lit) -> std::string {
                     using L = std::decay_t<decltype(lit)>;
-                    if constexpr (std::is_same_v<L, std::string>) return std::format("\"{}\"", escape_json_string(lit));
+                    if constexpr (std::is_same_v<L, std::string>)
+                        return std::format("{{\"$literal\":\"{}\"}}", escape_json_string(lit));
                     if constexpr (std::is_same_v<L, std::int64_t>) return std::to_string(lit);
                     if constexpr (std::is_same_v<L, double>) return std::to_string(lit);
                     if constexpr (std::is_same_v<L, bool>) return lit ? "true" : "false";
                 }, v.value);
             } else if constexpr (std::is_same_v<T, ir::IrStateRef>) {
-                // One-way state read — no $ prefix, so projections can tell a
-                // plain read apart from a two-way binding ref (see below).
-                return std::format("\"{}{}\"", v.name,
-                    v.member.empty() ? "" : std::format(".{}", v.member));
+                return std::format("\"{}{}\"", escape_json_string(v.name),
+                    v.member.empty() ? "" : std::format(".{}", escape_json_string(v.member)));
             } else if constexpr (std::is_same_v<T, ir::IrBindingRef>) {
-                // Two-way binding ref — the $ prefix is the mode marker that
-                // projections use to wire write-back through the change event.
-                return std::format("\"${}{}\"", v.name,
-                    v.member.empty() ? "" : std::format(".{}", v.member));
+                return std::format("\"{}{}\"", escape_json_string(v.name),
+                    v.member.empty() ? "" : std::format(".{}", escape_json_string(v.member)));
             } else if constexpr (std::is_same_v<T, ir::IrEnumValue>) {
                 return std::format("\"{}\"", v.value_name);
             } else if constexpr (std::is_same_v<T, ir::IrRange>) {
@@ -282,8 +279,7 @@ private:
     // "clicks += 1"          → state assignment
     // "open()" / "open($pop)"→ method call (open/close protocol)
     // "onSubmit(\"x\")"       → abstract event firing
-    // Serialize an IrInnerAction (assign / event / call) - the statement
-    // subset allowed inside if/else bodies of a closure.
+    // Serialize an IrInnerAction, including nested conditionals.
     static inline std::string serialize_inner_action(ir::IrInnerAction const& action) {
         return std::visit([](auto const& a) -> std::string {
             using T = std::decay_t<decltype(a)>;
@@ -318,6 +314,45 @@ private:
                     args += value_to_text(a.arguments[i]);
                 }
                 return std::format("{}({})", a.event_name, args);
+            } else if constexpr (std::is_same_v<T, std::shared_ptr<ir::IrInnerIfAction>>) {
+                if (!a) return std::string();
+                std::string lhs = value_to_text(a->condition_lhs);
+                std::string rhs = value_to_text(a->condition_rhs);
+                std::string op;
+                switch (a->condition_op) {
+                    case ast::BinaryOp::Eq:    op = "=="; break;
+                    case ast::BinaryOp::Neq:   op = "!="; break;
+                    case ast::BinaryOp::Lt:    op = "<";  break;
+                    case ast::BinaryOp::Lte:   op = "<="; break;
+                    case ast::BinaryOp::Gt:    op = ">";  break;
+                    case ast::BinaryOp::Gte:   op = ">="; break;
+                    default: op = "!=";
+                }
+                bool is_bare_bool = false;
+                if (a->condition_op == ast::BinaryOp::Neq) {
+                    if (auto const* lit = std::get_if<ir::IrLiteral>(&a->condition_rhs)) {
+                        if (lit->type == ast::TypeKind::Bool)
+                            if (auto const* b = std::get_if<bool>(&lit->value))
+                                is_bare_bool = (*b == false);
+                    }
+                }
+                std::string out = is_bare_bool
+                    ? std::format("if ({}) {{", lhs)
+                    : std::format("if ({} {} {}) {{", lhs, op, rhs);
+                for (auto const& inner : a->then_body) {
+                    auto s = serialize_inner_action(inner);
+                    if (!s.empty()) out += " " + s + ";";
+                }
+                out += " }";
+                if (!a->else_body.empty()) {
+                    out += " else {";
+                    for (auto const& inner : a->else_body) {
+                        auto s = serialize_inner_action(inner);
+                        if (!s.empty()) out += " " + s + ";";
+                    }
+                    out += " }";
+                }
+                return out;
             }
             return std::string();
         }, action);
@@ -464,6 +499,14 @@ private:
                                     escape_json_string(k), escape_json_string(v));
             }
             json += "]";
+        }
+        for (auto const& [key, value] : node.raw_attrs) {
+            std::string lowered = key;
+            for (auto& c : lowered) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (lowered == "slot") {
+                json += std::format(",\"slot\":\"{}\"", escape_json_string(value));
+                break;
+            }
         }
 
         // Event modifiers with closure bodies → events[].action (the marker
@@ -670,8 +713,13 @@ private:
             ti.blob_idx = blob_heap.add_custom_attr_string(serialize_view_to_json(view));
             ti.guid_blob_idx = blob_heap.add_custom_attr_guid(seed_counter++);
             ti.base_class = view.base_class;
-            if (!view.base_class.empty() && view.base_class != "Application"
-                && view.base_class != "Window" && view.base_class != "UserControl") {
+            if (view.base_class == "Application") {
+                ti.extends_coded = (1 << 2) | 1; // TypeRef 1: Application
+            } else if (view.base_class == "Window") {
+                ti.extends_coded = (2 << 2) | 1; // TypeRef 2: Window
+            } else if (view.base_class == "UserControl") {
+                ti.extends_coded = (3 << 2) | 1; // TypeRef 3: UserControl
+            } else if (!view.base_class.empty()) {
                 if (std::find(base_names.begin(), base_names.end(), view.base_class) == base_names.end())
                     base_names.push_back(view.base_class);
                 ti.extends_coded = 0; // patched below once TypeRef rows are assigned

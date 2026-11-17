@@ -102,6 +102,7 @@ The `.winui` compiler suite and runtime framework provide deep OS-level integrat
 ### 10. Glob Pattern & Directory Scanning
 - **Glob Expansion**: The CLI accepts wildcard patterns (`*.winui`, `page*.winui`) even when the shell doesn't expand them — the compiler implements its own `*` and `?` pattern matching.
 - **Recursive Directory Scan**: Passing a directory recursively scans it for all `.winui` files, processing them in a single compilation run.
+- **External Sample Sidecars**: `Samples\WinUI\` translation sidecars remain external resources; directory and glob expansion copies them for samples but does not compile them as app views.
 - **No Hardcoded Paths**: All paths use environment variables (`%ProgramFiles%`, `%ProgramFiles(x86)%`, `getenv`) — works on any Windows machine.
 
 ### 9. Titlebar Text Attribute (`WinUITitlebarAttribute`)

@@ -141,9 +141,19 @@ struct IrCallMethod {
     SourceLocation      location;
 };
 
-// Inner action types used inside IrIfAction (no recursive IrIfAction to break cycles).
-// This allows one level of if-else nesting inside closures.
-using IrInnerAction = std::variant<IrAssign, IrFireEvent, IrCallMethod>;
+struct IrInnerIfAction;
+
+using IrInnerAction = std::variant<IrAssign, IrFireEvent, IrCallMethod,
+                                   std::shared_ptr<IrInnerIfAction>>;
+
+struct IrInnerIfAction {
+    IrValue                    condition_lhs;
+    ast::BinaryOp              condition_op;
+    IrValue                    condition_rhs;
+    std::vector<IrInnerAction> then_body;
+    std::vector<IrInnerAction> else_body;
+    SourceLocation             location;
+};
 
 // Variable declaration inside a closure: var x: type = expr
 struct IrVarDecl {

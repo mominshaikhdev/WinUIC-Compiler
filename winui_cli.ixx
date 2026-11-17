@@ -33,10 +33,12 @@ module;
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 #include <span>
 #include <algorithm>
 #include <ranges>
 #include <array>
+#include <map>
 #include <set>
 export module winui.cli;
 
@@ -123,6 +125,22 @@ inline auto normalize_win_path(std::string path) -> std::string {
         }
     }
     return path;
+}
+
+inline auto is_external_sample_sidecar(std::filesystem::path const& path) -> bool {
+    auto is_component = [](std::filesystem::path const& part, std::string_view expected) {
+        std::string value = part.string();
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return value == expected;
+    };
+    for (auto part = path.begin(); part != path.end(); ++part) {
+        if (!is_component(*part, "samples")) continue;
+        auto next = part;
+        ++next;
+        if (next != path.end() && is_component(*next, "winui")) return true;
+    }
+    return false;
 }
 
 // CLI path validation: accepts both / and \ as path separators.
@@ -270,7 +288,7 @@ struct CliOptions {
                 std::string pattern = p.filename().string();
                 // Use recursive_directory_iterator and match the pattern
                 for (auto const& entry : std::filesystem::recursive_directory_iterator(parent, ec)) {
-                    if (!entry.is_regular_file()) continue;
+                    if (!entry.is_regular_file() || is_external_sample_sidecar(entry.path())) continue;
                     std::string fname = entry.path().filename().string();
                     // Simple glob match: * matches any, ? matches one
                     auto glob_match = [](std::string_view pat, std::string_view str) -> bool {
@@ -300,7 +318,8 @@ struct CliOptions {
             if (std::filesystem::is_directory(p, ec)) {
                 // Recursively scan directory for .winui files
                 for (auto const& entry : std::filesystem::recursive_directory_iterator(p, ec)) {
-                    if (entry.is_regular_file() && entry.path().extension() == ".winui") {
+                    if (entry.is_regular_file() && entry.path().extension() == ".winui"
+                        && !is_external_sample_sidecar(entry.path())) {
                         expanded.push_back(normalize_win_path(entry.path().string()));
                     }
                 }
@@ -909,28 +928,10 @@ inline auto run(int argc, char** argv) -> int {
             }
         }
 
-    // Per-project asset copy: scan .winui files for quoted paths that
-    // reference resource files (images, fonts, media, etc.) and copy ONLY
-    // those files.  Also walk source roots for asset directories that are
-    // siblings of the .winui files, but only copy matching filenames.
+    // Copy only resource files explicitly referenced by the .winui sources.
     std::size_t assets_copied = 0;
     {
-        // Step 1: Collect all .winui source file contents
-        std::vector<std::string> winui_sources;
-        for (auto const& f : opts->input_files) {
-            std::ifstream ifs(f);
-            if (ifs) {
-                winui_sources.emplace_back(
-                    (std::istreambuf_iterator<char>(ifs)),
-                    std::istreambuf_iterator<char>());
-            }
-        }
-        // Step 2: Extract quoted path fragments that look like asset refs.
-        // Match patterns like: "Assets\foo.png", "controls\bar.svg",
-        // "..\..\assets\icon.ico", "media\video.mp4" etc.
-        // We look for quoted strings containing a path separator and a
-        // known resource extension.
-        std::set<std::string> referenced_assets;
+        std::map<std::string, std::string> referenced_assets;
         auto is_resource_ext = [](std::string_view ext) -> bool {
             return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" ||
                    ext == ".svg" || ext == ".ico" || ext == ".bmp" || ext == ".webp" ||
@@ -940,140 +941,285 @@ inline auto run(int argc, char** argv) -> int {
                    ext == ".json" || ext == ".resw" || ext == ".xbf" ||
                    ext == ".bin" || ext == ".eot";
         };
-        for (auto const& src : winui_sources) {
-            // Find all quoted strings
-            for (std::size_t i = 0; i + 1 < src.size(); ) {
-                auto q1 = src.find('"', i);
-                if (q1 == std::string::npos) break;
-                auto q2 = src.find('"', q1 + 1);
-                if (q2 == std::string::npos) break;
-                std::string_view tok(src.data() + q1 + 1, q2 - q1 - 1);
-                i = q2 + 1;
-                // Must contain a path separator and end with a resource ext
-                bool has_sep = tok.find('\\') != std::string_view::npos ||
-                               tok.find('/')  != std::string_view::npos;
-                if (!has_sep) continue;
-                // Extract extension
-                auto dot = tok.rfind('.');
-                if (dot == std::string_view::npos) continue;
-                std::string ext_lower(tok.substr(dot));
-                for (auto& c : ext_lower)
-                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                if (!is_resource_ext(ext_lower)) continue;
-                // Normalize separators to backslash for matching
-                std::string normalized(tok);
-                for (auto& c : normalized)
-                    if (c == '/') c = '\\';
-                referenced_assets.insert(normalized);
+        auto lower_ascii = [](std::string value) {
+            for (auto& c : value)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return value;
+        };
+        auto add_asset_reference = [&](std::string_view raw) {
+            auto end = raw.find_first_of("?#");
+            if (end != std::string_view::npos) raw = raw.substr(0, end);
+            if (raw.empty()) return;
+
+            std::string candidate(raw);
+            std::string lowered = lower_ascii(candidate);
+            auto assets_pos = lowered.find("assets");
+            if (assets_pos != std::string::npos &&
+                (assets_pos == 0 || candidate[assets_pos - 1] == '/' ||
+                 candidate[assets_pos - 1] == '\\') &&
+                assets_pos + 6 < candidate.size() &&
+                (candidate[assets_pos + 6] == '/' || candidate[assets_pos + 6] == '\\')) {
+                candidate.erase(0, assets_pos);
+            } else {
+                auto scheme = lowered.find("://");
+                if (scheme != std::string::npos) {
+                    if (!lowered.starts_with("ms-appx://")) return;
+                    candidate.erase(0, scheme + 3);
+                }
+            }
+
+            for (auto& c : candidate)
+                if (c == '/') c = '\\';
+            while (!candidate.empty() && candidate.front() == '\\')
+                candidate.erase(candidate.begin());
+            while (candidate.starts_with(".\\"))
+                candidate.erase(0, 2);
+
+            auto slash = candidate.find_last_of('\\');
+            auto dot = candidate.find_last_of('.');
+            if (slash == std::string::npos || dot == std::string::npos || dot <= slash)
+                return;
+            auto ext = lower_ascii(candidate.substr(dot));
+            if (!is_resource_ext(ext)) return;
+            auto key = lower_ascii(candidate);
+            referenced_assets.try_emplace(std::move(key), std::move(candidate));
+        };
+
+        for (auto const& file : opts->input_files) {
+            std::ifstream input(file, std::ios::binary);
+            if (!input) {
+                std::println(stderr, "[winui] warning: could not read source for asset scanning: '{}'", file);
+                continue;
+            }
+            std::string source((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+
+            for (std::size_t i = 0; i < source.size();) {
+                if (source[i] != '"' && source[i] != '\'') {
+                    ++i;
+                    continue;
+                }
+                char quote = source[i++];
+                auto end = source.find(quote, i);
+                if (end == std::string::npos) break;
+                add_asset_reference(std::string_view(source).substr(i, end - i));
+                i = end + 1;
+            }
+
+            std::string lowered = lower_ascii(source);
+            for (std::size_t pos = 0; (pos = lowered.find("assets", pos)) != std::string::npos;) {
+                auto path_start = pos + 6;
+                if (path_start >= source.size() ||
+                    (source[path_start] != '/' && source[path_start] != '\\')) {
+                    pos = path_start;
+                    continue;
+                }
+                auto end = source.find_first_of("\"'<> \t\r\n)", path_start);
+                if (end == std::string::npos) end = source.size();
+                std::string asset_path = "Assets\\";
+                asset_path.append(source, path_start + 1, end - path_start - 1);
+                add_asset_reference(asset_path);
+                pos = end;
             }
         }
         if (opts->verbose && !referenced_assets.empty()) {
             std::println("[winui] Found {} referenced asset path(s) in .winui sources",
                          referenced_assets.size());
         }
-        // Step 3: Discover source root directories (input file dir + parent)
-        std::vector<std::string> src_roots;
-        auto add_root = [&](std::string const& rs) {
-            for (auto const& s : src_roots) if (s == rs) return;
-            src_roots.push_back(rs);
+
+        std::vector<std::filesystem::path> source_roots;
+        auto has_ui_sources = [&](std::filesystem::path const& root) {
+            std::error_code ec;
+            for (std::filesystem::directory_iterator entry(root, ec), end;
+                 !ec && entry != end; entry.increment(ec)) {
+                if (entry->is_regular_file(ec)) {
+                    auto ext = lower_ascii(entry->path().extension().string());
+                    if (ext == ".winui" || ext == ".xaml") return true;
+                } else if (entry->is_directory(ec)) {
+                    std::error_code child_ec;
+                    for (std::filesystem::directory_iterator child(entry->path(), child_ec), child_end;
+                         !child_ec && child != child_end; child.increment(child_ec)) {
+                        if (!child->is_regular_file(child_ec)) continue;
+                        auto ext = lower_ascii(child->path().extension().string());
+                        if (ext == ".winui" || ext == ".xaml") return true;
+                    }
+                }
+            }
+            return false;
         };
-        for (auto const& f : opts->input_files) {
-            std::filesystem::path p = std::filesystem::absolute(f);
-            auto dir = p.parent_path();
-            add_root(dir.string());
-            if (!dir.parent_path().empty()) add_root(dir.parent_path().string());
-            for (int d = 0; d < 3 && !dir.empty(); ++d) {
-                std::error_code ec;
-                if (std::filesystem::is_directory(dir / "Assets", ec))
-                    add_root(dir.string());
+        auto add_root = [&](std::filesystem::path root) {
+            std::error_code ec;
+            root = std::filesystem::weakly_canonical(root, ec);
+            if (ec || !std::filesystem::is_directory(root, ec) || !has_ui_sources(root))
+                return;
+            if (std::find(source_roots.begin(), source_roots.end(), root) == source_roots.end())
+                source_roots.push_back(std::move(root));
+        };
+        for (auto const& file : opts->input_files) {
+            std::error_code ec;
+            auto path = std::filesystem::absolute(file, ec);
+            if (ec) continue;
+            auto dir = std::filesystem::is_directory(path, ec) ? path : path.parent_path();
+            add_root(dir);
+            for (int depth = 0; depth < 10 && !dir.empty(); ++depth) {
+                std::error_code asset_ec;
+                if (std::filesystem::is_directory(dir / "Assets", asset_ec))
+                    add_root(dir);
+
                 auto parent = dir.parent_path();
-                if (!parent.empty()) {
-                    for (auto const& sib : std::filesystem::directory_iterator(parent, ec)) {
-                        if (!sib.is_directory()) continue;
-                        std::error_code ec2;
-                        if (std::filesystem::is_directory(sib.path() / "Assets", ec2))
-                            add_root(sib.path().string());
-                        for (auto const& child : std::filesystem::directory_iterator(sib.path(), ec2)) {
-                            if (!child.is_directory()) continue;
-                            std::error_code ec3;
-                            if (std::filesystem::is_directory(child.path() / "Assets", ec3))
-                                add_root(child.path().string());
-                        }
+                if (parent.empty() || parent == dir) break;
+                std::error_code siblings_ec;
+                for (std::filesystem::directory_iterator sibling(parent, siblings_ec), end;
+                     !siblings_ec && sibling != end; sibling.increment(siblings_ec)) {
+                    std::error_code sibling_ec;
+                    if (!sibling->is_directory(sibling_ec)) continue;
+                    if (std::filesystem::is_directory(sibling->path() / "Assets", sibling_ec))
+                        add_root(sibling->path());
+
+                    std::error_code children_ec;
+                    for (std::filesystem::directory_iterator child(sibling->path(), children_ec), child_end;
+                         !children_ec && child != child_end; child.increment(children_ec)) {
+                        std::error_code child_ec;
+                        if (child->is_directory(child_ec) &&
+                            std::filesystem::is_directory(child->path() / "Assets", child_ec))
+                            add_root(child->path());
                     }
                 }
-                dir = dir.parent_path();
+
+                dir = std::move(parent);
             }
         }
-        // Step 4: For each source root, walk asset dirs and copy ONLY files
-        // whose relative path matches a reference from the .winui sources.
-        // If no references were found at all, copy nothing.
-        if (!referenced_assets.empty()) {
-            for (auto const& rs : src_roots) {
+
+        std::size_t missing_assets = 0;
+        std::size_t copy_failures = 0;
+        for (auto const& [ref_key, ref] : referenced_assets) {
+            (void)ref_key;
+            bool copied = false;
+            for (auto const& root : source_roots) {
+                auto source = root / std::filesystem::path(ref);
                 std::error_code ec;
-                for (auto const& dirname : {"Assets", "Controls", "Styles", "Layouts"}) {
-                    std::filesystem::path src_dir = std::filesystem::path(rs) / dirname;
-                    if (!std::filesystem::is_directory(src_dir, ec)) continue;
-                    for (auto const& entry : std::filesystem::recursive_directory_iterator(src_dir)) {
-                        if (!entry.is_regular_file()) continue;
-                        auto ext = entry.path().extension().string();
-                        for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        if (!is_resource_ext(ext)) continue;
-                        // Get relative path from source root, normalize separators
-                        auto rel = std::filesystem::relative(entry.path(), std::filesystem::path(rs));
-                        std::string rel_str = rel.string();
-                        for (auto& c : rel_str) if (c == '/') c = '\\';
-                        // Check if any referenced asset matches this file
-                        bool matched = false;
-                        for (auto const& ref : referenced_assets) {
-                            // Match exact or as suffix (ref may be partial like "assets\icon.png")
-                            if (rel_str == ref) { matched = true; break; }
-                            // Normalize ref for comparison
-                            std::string ref_norm = ref;
-                            for (auto& c : ref_norm) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            std::string rel_lower = rel_str;
-                            for (auto& c : rel_lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            if (rel_lower == ref_norm) { matched = true; break; }
-                            // Check if ref is a suffix of the relative path
-                            if (rel_lower.size() >= ref_norm.size() &&
-                                rel_lower.substr(rel_lower.size() - ref_norm.size()) == ref_norm)
-                            { matched = true; break; }
-                            // Check if the filename alone matches
-                            auto ref_basename_pos = ref_norm.find_last_of('\\');
-                            auto rel_basename_pos = rel_lower.find_last_of('\\');
-                            if (ref_basename_pos != std::string::npos &&
-                                rel_basename_pos != std::string::npos) {
-                                if (ref_norm.substr(ref_basename_pos + 1) ==
-                                    rel_lower.substr(rel_basename_pos + 1))
-                                { matched = true; break; }
-                            }
-                        }
-                        if (!matched) continue;
-                        auto dest = std::filesystem::path(opts->output_dir) / rel;
-                        std::error_code cec;
-                        std::filesystem::create_directories(dest.parent_path());
-                        std::filesystem::copy_file(entry.path(), dest,
-                            std::filesystem::copy_options::overwrite_existing, cec);
-                        if (!cec) ++assets_copied;
-                    }
+                if (!std::filesystem::is_regular_file(source, ec))
+                    continue;
+                auto dest = std::filesystem::path(opts->output_dir) /
+                            std::filesystem::path(ref);
+                std::filesystem::create_directories(dest.parent_path(), ec);
+                if (ec) {
+                    ++copy_failures;
+                    std::println(stderr, "[winui] warning: could not create asset directory for '{}': {}",
+                                 ref, ec.message());
+                    break;
                 }
+                std::filesystem::copy_file(source, dest,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    ++copy_failures;
+                    std::println(stderr, "[winui] warning: could not copy asset '{}': {}",
+                                 ref, ec.message());
+                    break;
+                }
+                ++assets_copied;
+                copied = true;
+                break;
+            }
+            if (!copied) {
+                ++missing_assets;
+                if (opts->verbose)
+                    std::println(stderr, "[winui] warning: referenced asset '{}' was not found in source roots",
+                                 ref);
             }
         }
-        if (assets_copied > 0) {
-            std::println("[winui] Copied {} referenced asset file(s) to '{}'",
-                         assets_copied, opts->output_dir);
-        } else if (!referenced_assets.empty()) {
-            std::println("[winui] {} asset reference(s) found but no matching files in source roots",
-                         referenced_assets.size());
-        } else {
-            if (opts->verbose)
-                std::println("[winui] No asset references found in .winui sources — nothing copied");
+
+        std::set<std::string, std::less<>> referenced_samples;
+        for (auto const& file : opts->input_files) {
+            std::ifstream input(file, std::ios::binary);
+            if (!input) continue;
+            std::string source((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+            std::size_t pos = 0;
+            while ((pos = source.find("SampleDefinition", pos)) != std::string::npos) {
+                auto comma = source.find(',', pos + 16);
+                if (comma == std::string::npos) {
+                    pos += 16;
+                    continue;
+                }
+                auto quote = source.find('"', comma + 1);
+                if (quote == std::string::npos) break;
+                auto end = source.find('"', quote + 1);
+                if (end == std::string::npos) break;
+                std::string sample = source.substr(quote + 1, end - quote - 1);
+                for (auto& ch : sample) if (ch == '/') ch = '\\';
+                bool unsafe = sample.empty() || sample.front() == '\\'
+                    || (sample.size() > 1 && sample[1] == ':');
+                for (std::size_t part = 0; !unsafe && part < sample.size();) {
+                    auto end_part = sample.find('\\', part);
+                    if (end_part == std::string::npos) end_part = sample.size();
+                    if (sample.substr(part, end_part - part) == "..") unsafe = true;
+                    part = end_part + 1;
+                }
+                if (!unsafe) referenced_samples.insert(sample);
+                pos = end + 1;
+            }
         }
-        for (auto const& src_root : src_roots) {
-            auto lic = std::filesystem::path(src_root) / "LICENSE";
-            if (std::filesystem::exists(lic)) {
-                std::error_code lec;
-                std::filesystem::copy_file(lic, std::filesystem::path(opts->output_dir) / "LICENSE",
-                    std::filesystem::copy_options::overwrite_existing, lec);
+        std::size_t samples_copied = 0;
+        for (auto const& sample : referenced_samples) {
+            std::string relative = sample;
+            for (auto& ch : relative) if (ch == '/') ch = '\\';
+            bool copied = false;
+            for (auto const& root : source_roots) {
+                auto source = root / "Samples" / std::filesystem::path(relative);
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(source, ec)) continue;
+                auto destination = std::filesystem::path(opts->output_dir) / "Samples" / std::filesystem::path(relative);
+                std::filesystem::create_directories(destination.parent_path(), ec);
+                if (!ec) std::filesystem::copy_file(source, destination,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    ++copy_failures;
+                    std::println(stderr, "[winui] warning: could not copy sample '{}': {}",
+                                 source.string(), ec.message());
+                } else {
+                    ++samples_copied;
+                    auto translated_source = root / "Samples" / "WinUI" / std::filesystem::path(relative);
+                    translated_source.replace_extension(".winui");
+                    std::error_code translated_ec;
+                    if (std::filesystem::is_regular_file(translated_source, translated_ec)) {
+                        auto translated_destination = std::filesystem::path(opts->output_dir)
+                            / "Samples" / "WinUI" / std::filesystem::path(relative);
+                        translated_destination.replace_extension(".winui");
+                        std::filesystem::create_directories(translated_destination.parent_path(), translated_ec);
+                        if (!translated_ec) std::filesystem::copy_file(translated_source, translated_destination,
+                            std::filesystem::copy_options::overwrite_existing, translated_ec);
+                        if (translated_ec)
+                            std::println(stderr, "[winui] warning: could not copy translated sample '{}': {}",
+                                         translated_source.string(), translated_ec.message());
+                    }
+                }
+                copied = true;
+                break;
+            }
+            if (!copied) {
+                ++missing_assets;
+                std::println(stderr, "[winui] warning: referenced sample '{}' was not found in source roots",
+                             relative);
+            }
+        }
+        if (samples_copied > 0)
+            std::println("[winui] External samples copied: {}", samples_copied);
+
+        if (assets_copied > 0 || missing_assets > 0 || copy_failures > 0) {
+            std::println("[winui] Asset copy: {} copied, {} missing, {} copy failure(s)",
+                         assets_copied, missing_assets, copy_failures);
+        }
+        for (auto const& root : source_roots) {
+            auto license = root / "LICENSE";
+            if (std::filesystem::exists(license)) {
+                std::error_code ec;
+                std::filesystem::copy_file(license,
+                    std::filesystem::path(opts->output_dir) / "LICENSE",
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec)
+                    std::println(stderr, "[winui] warning: could not copy LICENSE from '{}': {}",
+                                 root.string(), ec.message());
                 break;
             }
         }
